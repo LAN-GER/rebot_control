@@ -1,4 +1,4 @@
-"""reBot B601-RS 控制包。"""
+"""reBot B601-RS control package. / reBot B601-RS 控制包。"""
 
 from .config import (
     DEFAULT_CONFIG_PATH,

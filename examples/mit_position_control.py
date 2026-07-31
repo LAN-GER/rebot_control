@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 """
+Example layer: MIT position control demo for reBot B601-RS.
 示例层：reBot B601-RS MIT 位置控制演示。
 
-功能：
-1. 在 TARGET_ANGLES 列表中手动填写 6 个关节目标角度
-2. 六个关节默认速度统一为 20 度/秒
-3. 按 Esc、Ctrl+C 或程序结束时缓慢回到零点
+Features / 功能：
+1. Fill in the 6 joint target angles manually in TARGET_ANGLES.
+   在 TARGET_ANGLES 列表中手动填写 6 个关节目标角度。
+2. All joints default to 20 deg/s.
+   六个关节默认速度统一为 20 度/秒。
+3. Press Esc, Ctrl+C, or let the program end to slowly return to zero.
+   按 Esc、Ctrl+C 或程序结束时缓慢回到零点。
 
-运行：
+Run / 运行：
     python3 examples/mit_position_control.py
 """
 
@@ -17,6 +21,7 @@ import sys
 import time
 from pathlib import Path
 
+# Allow running this file directly from the project root.
 # 允许从项目根目录直接运行本文件。
 sys.path.insert(
     0,
@@ -27,13 +32,14 @@ from rebot import ReBotRSMITController, load_config
 
 
 # =============================================================================
-# 演示参数 / DEMO PARAMETERS
+# Demo parameters / 演示参数
 # =============================================================================
 
+# Controller config file path; None means the default config/rebotarm_rs.yaml.
 # 控制器配置文件路径；None 表示使用默认的 config/rebotarm_rs.yaml。
 CONFIG_PATH = None
 
-# 手动填写目标角度，顺序为 J1-J6，单位：度。
+# Target angles for J1-J6, in degrees. / 目标角度，顺序为 J1-J6，单位：度。
 TARGET_ANGLES = [
     50.0,  # J1
     0.0,   # J2
@@ -43,6 +49,7 @@ TARGET_ANGLES = [
     0.0,   # J6
 ]
 
+# Max motion speed of each joint, in deg/s.
 # 六个关节的最大运动速度，单位：度/秒。
 JOINT_SPEEDS_DEG_S = [
     20.0,  # J1
@@ -56,6 +63,7 @@ JOINT_SPEEDS_DEG_S = [
 
 def main() -> None:
     if CONFIG_PATH is None:
+        # Without a config it loads config/rebotarm_rs.yaml automatically.
         # 不传配置时自动加载 config/rebotarm_rs.yaml。
         arm = ReBotRSMITController()
     else:
@@ -69,19 +77,22 @@ def main() -> None:
             install_signal_handlers=True,
         )
 
-        # 六个关节统一设置为 20°/s。
+        # Set all six joints to 20 deg/s. / 六个关节统一设置为 20°/s。
         arm.set_max_speeds(JOINT_SPEEDS_DEG_S)
 
         print(
-            "[速度] "
-            f"{JOINT_SPEEDS_DEG_S} 度/秒"
+            "[Speed / 速度] "
+            f"Speed: {JOINT_SPEEDS_DEG_S} deg/s / "
+            f"速度: {JOINT_SPEEDS_DEG_S} 度/秒"
         )
 
         print(
-            "[目标] "
-            f"{TARGET_ANGLES} 度"
+            "[Target / 目标] "
+            f"Target: {TARGET_ANGLES} deg / "
+            f"目标: {TARGET_ANGLES} 度"
         )
 
+        # This line must run, otherwise the arm never updates its target.
         # 这一行必须执行，机械臂才会更新目标。
         arm.set_joint_angles(TARGET_ANGLES)
 
@@ -98,9 +109,9 @@ def main() -> None:
 
             print(
                 "\r"
-                f"目标: {[round(x, 2) for x in target_angles]}  |  "
-                f"发送: {[round(x, 2) for x in command_angles]}  |  "
-                f"MOS温度: {temperature_text}",
+                f"Target/目标: {[round(x, 2) for x in target_angles]}  |  "
+                f"Sent/发送: {[round(x, 2) for x in command_angles]}  |  "
+                f"MOS temp/MOS温度: {temperature_text}",
                 end="",
                 flush=True,
             )
@@ -109,7 +120,7 @@ def main() -> None:
 
     except Exception as error:
         print(
-            f"\n[程序错误] {error}"
+            f"\n[Program error / 程序错误] Error: {error} / 错误: {error}"
         )
 
     finally:

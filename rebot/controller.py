@@ -1,5 +1,15 @@
 #!/usr/bin/env python3
 """
+Interface layer: reBot B601-RS MIT controller.
+
+Features:
+1. Continuously sends position commands in MIT mode
+2. Independent speed limit for each joint
+3. Real-time monitoring of RobStride MOS temperature
+4. Three-level protection: temperature alarm, over-temperature return-to-zero, and emergency disable
+5. Slowly returns to zero when Esc or Ctrl+C is pressed or arm.stop() is called
+6. Pressing Ctrl+C again during return-to-zero immediately aborts the return and disables the motors
+
 接口层：reBot B601-RS MIT 控制器。
 
 功能：
@@ -10,8 +20,12 @@
 5. 按 Esc、Ctrl+C 或调用 arm.stop() 时缓慢回到零点
 6. 回零过程中再次按 Ctrl+C，立即中止回零并失能
 
+All hardware and safety parameters come from the configuration layer (rebot/config.py reads config/*.yaml).
 所有硬件与安全参数来自配置层（rebot/config.py 读取 config/*.yaml）。
 
+Angle units:
+    External target angles: degrees
+    MotorBridge MIT commands: radians
 角度单位：
     外部目标角度：度
     MotorBridge MIT 指令：弧度
@@ -40,7 +54,7 @@ from .config import (
 
 
 class ReBotRSMITController:
-    """reBot B601-RS MIT 控制器。"""
+    """reBot B601-RS MIT controller. / reBot B601-RS MIT 控制器。"""
 
     def __init__(
         self,
@@ -50,7 +64,9 @@ class ReBotRSMITController:
             config = load_config()
 
             print(
-                "[配置] 已加载配置文件："
+                "[Config / 配置] Loaded config file: "
+                f"{DEFAULT_CONFIG_PATH}"
+                " / 已加载配置文件："
                 f"{DEFAULT_CONFIG_PATH}"
             )
 
@@ -77,11 +93,12 @@ class ReBotRSMITController:
         self.controller: Controller | None = None
         self.motors = []
 
-        # 用户设置的最终目标，单位：弧度。
+        # Final target set by the user, unit: radians. / 用户设置的最终目标，单位：弧度。
         self.target_positions = [
             0.0 for _ in self.config.motors
         ]
 
+        # The target actually sent to the motors after speed limiting, unit: radians.
         # 经过速度限制后实际发送给电机的目标，单位：弧度。
         self.command_positions = [
             0.0 for _ in self.config.motors
@@ -122,16 +139,17 @@ class ReBotRSMITController:
         ]
 
     # -------------------------------------------------------------------------
-    # 连接与启动
+    # Connection and startup / 连接与启动
     # -------------------------------------------------------------------------
 
     def connect(self) -> None:
-        """连接 CAN、注册电机、切换 MIT 模式并使能。"""
+        """Connect CAN, register motors, switch to MIT mode, and enable.
+        连接 CAN、注册电机、切换 MIT 模式并使能。"""
 
         if self.controller is not None:
             return
 
-        print(f"[连接] 打开 CAN 接口：{self.channel}")
+        print(f"[Connect / 连接] Opening CAN interface: {self.channel} / 打开 CAN 接口：{self.channel}")
 
         self.controller = Controller(self.channel)
 
@@ -146,10 +164,13 @@ class ReBotRSMITController:
                 self.motors.append(motor)
 
                 print(
-                    f"[连接] 电机 {motor_config.motor_id} "
+                    f"[Connect / 连接] Motor {motor_config.motor_id} "
+                    f"({motor_config.model}) registered / "
+                    f"电机 {motor_config.motor_id} "
                     f"({motor_config.model}) 已注册"
                 )
 
+            # Read the actual positions before startup to avoid a sudden jump after enabling.
             # 启动前读取实际位置，避免使能后突然跳动。
             current_positions = self._read_positions_rad()
 
@@ -158,7 +179,9 @@ class ReBotRSMITController:
                 self.command_positions[:] = current_positions
 
             print(
-                "[连接] 当前角度："
+                "[Connect / 连接] Current angles: "
+                f"{[round(math.degrees(x), 2) for x in current_positions]}"
+                " / 当前角度："
                 f"{[round(math.degrees(x), 2) for x in current_positions]}"
             )
 
@@ -166,7 +189,9 @@ class ReBotRSMITController:
                 motor_id = self.config.motors[index].motor_id
 
                 print(
-                    f"[连接] 电机 {motor_id} "
+                    f"[Connect / 连接] Motor {motor_id} "
+                    "switching to MIT mode / "
+                    f"电机 {motor_id} "
                     "切换到 MIT 模式"
                 )
 
@@ -178,13 +203,13 @@ class ReBotRSMITController:
 
                 time.sleep(0.05)
 
-            # 所有电机只使能一次。
+            # Enable all motors only once. / 所有电机只使能一次。
             with self.io_lock:
                 self.controller.enable_all()
 
             time.sleep(0.30)
 
-            print("[连接] 所有电机已使能")
+            print("[Connect / 连接] All motors enabled / 所有电机已使能")
 
         except Exception:
             self._disable_and_close()
@@ -196,7 +221,8 @@ class ReBotRSMITController:
         enable_esc: bool = True,
         install_signal_handlers: bool = True,
     ) -> None:
-        """启动 MIT 控制线程和温度监控线程。"""
+        """Start the MIT control thread and the temperature monitoring thread.
+        启动 MIT 控制线程和温度监控线程。"""
 
         if self.started:
             return
@@ -244,30 +270,41 @@ class ReBotRSMITController:
             )
 
         print(
-            f"[启动] MIT 频率："
+            f"[Start / 启动] MIT rate: "
+            f"{self.control_hz:.0f} Hz"
+            f" / MIT 频率："
             f"{self.control_hz:.0f} Hz"
         )
         print(
-            f"[启动] 温度刷新："
+            f"[Start / 启动] Temperature refresh: "
+            f"{self.telemetry_hz:.1f} Hz"
+            f" / 温度刷新："
             f"{self.telemetry_hz:.1f} Hz"
         )
         print(
-            "[启动] 温度阈值："
+            "[Start / 启动] Temperature thresholds: "
+            f"alarm={self.temp_alarm_c:.1f}°C, "
+            f"return-to-zero={self.temp_return_zero_c:.1f}°C, "
+            f"disconnect={self.temp_disconnect_c:.1f}°C"
+            " / 温度阈值："
             f"报警={self.temp_alarm_c:.1f}°C，"
             f"回零={self.temp_return_zero_c:.1f}°C，"
             f"断开={self.temp_disconnect_c:.1f}°C"
         )
         print(
-            "[启动] Esc / Ctrl+C / arm.stop() "
+            "[Start / 启动] Esc / Ctrl+C / arm.stop() "
+            "will slowly return to zero and then disable / "
+            "Esc / Ctrl+C / arm.stop() "
             "会缓慢回零后失能"
         )
 
     # -------------------------------------------------------------------------
-    # MIT 控制
+    # MIT control / MIT 控制
     # -------------------------------------------------------------------------
 
     def _control_loop(self) -> None:
-        """持续生成带速度限制的目标并发送 MIT 指令。"""
+        """Continuously generate speed-limited targets and send MIT commands.
+        持续生成带速度限制的目标并发送 MIT 指令。"""
 
         period = 1.0 / self.control_hz
         next_tick = time.perf_counter()
@@ -301,12 +338,16 @@ class ReBotRSMITController:
                 self.last_error = error
 
                 print(
-                    f"\n[控制错误] {error}"
+                    f"\n[Control error / 控制错误] {error}"
                 )
 
+                # Do not attempt return-to-zero on a communication failure.
                 # 通信异常时不再尝试回零。
                 self.request_stop(
-                    reason=f"控制通信异常：{error}",
+                    reason=(
+                        f"Control communication error: {error}"
+                        f" / 控制通信异常：{error}"
+                    ),
                     return_to_zero=False,
                     emergency=True,
                     wait=False,
@@ -325,7 +366,8 @@ class ReBotRSMITController:
         self,
         positions_rad: Sequence[float],
     ) -> None:
-        """向全部电机发送一组 MIT 位置指令。"""
+        """Send a set of MIT position commands to all motors.
+        向全部电机发送一组 MIT 位置指令。"""
 
         with self.io_lock:
             for index, motor in enumerate(self.motors):
@@ -340,7 +382,7 @@ class ReBotRSMITController:
                 )
 
     # -------------------------------------------------------------------------
-    # 外部控制接口
+    # External control interface / 外部控制接口
     # -------------------------------------------------------------------------
 
     def set_joint_angles(
@@ -348,6 +390,13 @@ class ReBotRSMITController:
         angles_deg: Sequence[float],
     ) -> None:
         """
+        Set the target angles of all joints.
+
+        Example:
+            arm.set_joint_angles(
+                [50, 0, 0, 0, 0, 0]
+            )
+
         设置全部关节目标角度。
 
         示例：
@@ -361,7 +410,9 @@ class ReBotRSMITController:
 
         if len(angles_deg) != self.motor_count:
             raise ValueError(
-                f"必须提供 {self.motor_count} 个角度，"
+                f"Must provide {self.motor_count} angles, "
+                f"received {len(angles_deg)}"
+                f" / 必须提供 {self.motor_count} 个角度，"
                 f"当前收到 {len(angles_deg)} 个"
             )
 
@@ -372,7 +423,8 @@ class ReBotRSMITController:
 
             if not math.isfinite(value):
                 raise ValueError(
-                    f"关节 {index + 1} 的角度无效"
+                    f"Invalid angle for joint {index + 1}"
+                    f" / 关节 {index + 1} 的角度无效"
                 )
 
             positions.append(math.radians(value))
@@ -385,20 +437,21 @@ class ReBotRSMITController:
         joint_id: int,
         angle_deg: float,
     ) -> None:
-        """只修改一个关节的目标角度。"""
+        """Modify the target angle of a single joint only. / 只修改一个关节的目标角度。"""
 
         if self.shutdown_started:
             return
 
         if not 1 <= joint_id <= self.motor_count:
             raise ValueError(
-                f"joint_id 必须为 1-{self.motor_count}"
+                f"joint_id must be 1-{self.motor_count}"
+                f" / joint_id 必须为 1-{self.motor_count}"
             )
 
         value = float(angle_deg)
 
         if not math.isfinite(value):
-            raise ValueError("angle_deg 无效")
+            raise ValueError("Invalid angle_deg / angle_deg 无效")
 
         with self.target_lock:
             self.target_positions[joint_id - 1] = (
@@ -409,11 +462,13 @@ class ReBotRSMITController:
         self,
         speeds_deg_s: Sequence[float],
     ) -> None:
-        """设置各关节的最大运动速度，单位：度/秒。"""
+        """Set the maximum motion speed of each joint, unit: degrees/second.
+        设置各关节的最大运动速度，单位：度/秒。"""
 
         if len(speeds_deg_s) != self.motor_count:
             raise ValueError(
-                f"必须提供 {self.motor_count} 个速度"
+                f"Must provide {self.motor_count} speeds"
+                f" / 必须提供 {self.motor_count} 个速度"
             )
 
         speeds_rad_s = []
@@ -423,7 +478,8 @@ class ReBotRSMITController:
 
             if not math.isfinite(value) or value <= 0:
                 raise ValueError(
-                    f"关节 {index + 1} 的速度必须大于 0"
+                    f"Speed of joint {index + 1} must be greater than 0"
+                    f" / 关节 {index + 1} 的速度必须大于 0"
                 )
 
             speeds_rad_s.append(
@@ -434,7 +490,7 @@ class ReBotRSMITController:
             self.max_speeds_rad_s[:] = speeds_rad_s
 
     def get_target_angles(self) -> list[float]:
-        """返回最终目标角度，单位：度。"""
+        """Return the final target angles, unit: degrees. / 返回最终目标角度，单位：度。"""
 
         with self.target_lock:
             values = self.target_positions.copy()
@@ -445,7 +501,8 @@ class ReBotRSMITController:
         ]
 
     def get_command_angles(self) -> list[float]:
-        """返回当前实际发送的平滑目标角度，单位：度。"""
+        """Return the smoothed target angles currently being sent, unit: degrees.
+        返回当前实际发送的平滑目标角度，单位：度。"""
 
         with self.target_lock:
             values = self.command_positions.copy()
@@ -456,7 +513,8 @@ class ReBotRSMITController:
         ]
 
     def read_joint_angles(self) -> list[float]:
-        """读取一次实际机械位置，单位：度。"""
+        """Read the actual mechanical positions once, unit: degrees.
+        读取一次实际机械位置，单位：度。"""
 
         return [
             math.degrees(value)
@@ -464,11 +522,11 @@ class ReBotRSMITController:
         ]
 
     # -------------------------------------------------------------------------
-    # 位置与温度读取
+    # Position and temperature reading / 位置与温度读取
     # -------------------------------------------------------------------------
 
     def _read_positions_rad(self) -> list[float]:
-        """读取 RobStride mechPos 参数 0x7019。"""
+        """Read the RobStride mechPos parameter 0x7019. / 读取 RobStride mechPos 参数 0x7019。"""
 
         positions = []
 
@@ -488,7 +546,9 @@ class ReBotRSMITController:
                     )
 
                     raise RuntimeError(
-                        f"电机 {motor_id} 位置读取失败："
+                        f"Failed to read position of motor {motor_id}: "
+                        f"{error}"
+                        f" / 电机 {motor_id} 位置读取失败："
                         f"{error}"
                     ) from error
 
@@ -509,7 +569,8 @@ class ReBotRSMITController:
     def _read_temperatures_once(
         self,
     ) -> list[float | None]:
-        """请求新反馈并读取每个电机的 MOS 温度。"""
+        """Request new feedback and read the MOS temperature of each motor.
+        请求新反馈并读取每个电机的 MOS 温度。"""
 
         temperatures: list[float | None] = []
 
@@ -547,7 +608,7 @@ class ReBotRSMITController:
         return temperatures
 
     def _temperature_loop(self) -> None:
-        """执行三级温度保护。"""
+        """Execute the three-level temperature protection. / 执行三级温度保护。"""
 
         period = 1.0 / self.telemetry_hz
 
@@ -557,7 +618,8 @@ class ReBotRSMITController:
 
             except Exception as error:
                 print(
-                    f"\n[温度] 反馈读取失败：{error}"
+                    f"\n[Temp / 温度] Feedback read failed: {error}"
+                    f" / 反馈读取失败：{error}"
                 )
                 continue
 
@@ -581,7 +643,10 @@ class ReBotRSMITController:
 
             if hottest_temp >= self.temp_disconnect_c:
                 print(
-                    "\n[紧急断开] "
+                    "\n[Emergency disconnect / 紧急断开] "
+                    f"Motor {hottest_motor_id} MOS="
+                    f"{hottest_temp:.1f}°C, "
+                    "disabling immediately, no return-to-zero / "
                     f"电机 {hottest_motor_id} MOS="
                     f"{hottest_temp:.1f}°C，"
                     "立即失能，不再回零"
@@ -589,7 +654,9 @@ class ReBotRSMITController:
 
                 self.request_stop(
                     reason=(
-                        f"电机 {hottest_motor_id} "
+                        f"Motor {hottest_motor_id} "
+                        "reached the emergency disconnect temperature"
+                        f" / 电机 {hottest_motor_id} "
                         "达到紧急断开温度"
                     ),
                     return_to_zero=False,
@@ -600,7 +667,10 @@ class ReBotRSMITController:
 
             if hottest_temp >= self.temp_return_zero_c:
                 print(
-                    "\n[高温回零] "
+                    "\n[High-temp return / 高温回零] "
+                    f"Motor {hottest_motor_id} MOS="
+                    f"{hottest_temp:.1f}°C, "
+                    "stopping motion and slowly returning to zero / "
                     f"电机 {hottest_motor_id} MOS="
                     f"{hottest_temp:.1f}°C，"
                     "停止运动并缓慢回零"
@@ -608,7 +678,9 @@ class ReBotRSMITController:
 
                 self.request_stop(
                     reason=(
-                        f"电机 {hottest_motor_id} "
+                        f"Motor {hottest_motor_id} "
+                        "reached the return-to-zero temperature"
+                        f" / 电机 {hottest_motor_id} "
                         "达到回零温度"
                     ),
                     return_to_zero=True,
@@ -619,20 +691,25 @@ class ReBotRSMITController:
 
             if hottest_temp >= self.temp_alarm_c:
                 print(
-                    "\n[温度报警] "
+                    "\n[Temp alarm / 温度报警] "
+                    f"Motor {hottest_motor_id} MOS="
+                    f"{hottest_temp:.1f}°C, "
+                    "arm keeps running / "
                     f"电机 {hottest_motor_id} MOS="
                     f"{hottest_temp:.1f}°C，"
                     "机械臂继续运行"
                 )
 
     # -------------------------------------------------------------------------
-    # Esc 和 Ctrl+C
+    # Esc and Ctrl+C / Esc 和 Ctrl+C
     # -------------------------------------------------------------------------
 
     def _start_keyboard_listener(self) -> None:
         if keyboard is None:
             print(
-                "[键盘] 未安装或无法使用 pynput，"
+                "[Keyboard / 键盘] pynput is not installed or unavailable, "
+                "Esc disabled; Ctrl+C and stop() still work / "
+                "未安装或无法使用 pynput，"
                 "Esc 功能关闭；Ctrl+C 和 stop() 仍然有效"
             )
             return
@@ -647,18 +724,21 @@ class ReBotRSMITController:
             self.keyboard_listener = None
 
             print(
-                f"[键盘] Esc 监听启动失败：{error}"
+                f"[Keyboard / 键盘] Failed to start Esc listener: {error}"
+                f" / Esc 监听启动失败：{error}"
             )
 
     def _on_key_press(self, key) -> bool | None:
         if keyboard is not None and key == keyboard.Key.esc:
             print(
-                "\n[退出] 检测到 Esc，"
+                "\n[Exit / 退出] Esc detected, "
+                "slowly returning to zero / "
+                "检测到 Esc，"
                 "正在缓慢回到零点"
             )
 
             self.request_stop(
-                reason="用户按下 Esc",
+                reason="User pressed Esc / 用户按下 Esc",
                 return_to_zero=True,
                 wait=False,
             )
@@ -671,19 +751,23 @@ class ReBotRSMITController:
 
         if self.signal_count == 1:
             print(
-                f"\n[退出] 收到信号 {signum}，"
+                f"\n[Exit / 退出] Received signal {signum}, "
+                "slowly returning to zero / "
+                f"收到信号 {signum}，"
                 "正在缓慢回到零点"
             )
 
             self.request_stop(
-                reason=f"收到信号 {signum}",
+                reason=f"Received signal {signum} / 收到信号 {signum}",
                 return_to_zero=True,
                 wait=False,
             )
 
         else:
             print(
-                "\n[退出] 第二次收到 Ctrl+C，"
+                "\n[Exit / 退出] Second Ctrl+C received, "
+                "aborting return-to-zero and disabling immediately / "
+                "第二次收到 Ctrl+C，"
                 "立即中止回零并失能"
             )
 
@@ -691,7 +775,7 @@ class ReBotRSMITController:
             self.worker_stop_event.set()
 
     # -------------------------------------------------------------------------
-    # 安全停止与回零
+    # Safe stop and return-to-zero / 安全停止与回零
     # -------------------------------------------------------------------------
 
     @staticmethod
@@ -702,13 +786,14 @@ class ReBotRSMITController:
     def request_stop(
         self,
         *,
-        reason: str = "调用 stop()",
+        reason: str = "stop() called / 调用 stop()",
         return_to_zero: bool = True,
         thermal: bool = False,
         emergency: bool = False,
         wait: bool = False,
     ) -> None:
-        """请求停止。第一次调用会创建安全停止线程。"""
+        """Request a stop. The first call creates the safe shutdown thread.
+        请求停止。第一次调用会创建安全停止线程。"""
 
         with self.shutdown_lock:
             if not self.shutdown_started:
@@ -747,6 +832,11 @@ class ReBotRSMITController:
         wait: bool = True,
     ) -> None:
         """
+        Stop interface called by external programs.
+
+        Default:
+            slowly return to zero -> disable -> close CAN
+
         外部程序调用的停止接口。
 
         默认：
@@ -754,16 +844,18 @@ class ReBotRSMITController:
         """
 
         self.request_stop(
-            reason="程序调用 arm.stop()",
+            reason="Program called arm.stop() / 程序调用 arm.stop()",
             return_to_zero=return_to_zero,
             wait=wait,
         )
 
     def _shutdown_worker(self) -> None:
         print(
-            f"\n[停止] 原因：{self.shutdown_reason}"
+            f"\n[Stop / 停止] Reason: {self.shutdown_reason}"
+            f" / 原因：{self.shutdown_reason}"
         )
 
+        # First stop the normal MIT control and temperature threads.
         # 先停止正常 MIT 控制和温度线程。
         self.worker_stop_event.set()
 
@@ -797,7 +889,7 @@ class ReBotRSMITController:
 
         except Exception as error:
             print(
-                f"\n[回零错误] {error}"
+                f"\n[Return-to-zero error / 回零错误] {error}"
             )
 
         finally:
@@ -806,17 +898,20 @@ class ReBotRSMITController:
             self.started = False
             self.shutdown_done_event.set()
 
-            print("[停止] 安全停止流程完成")
+            print("[Stop / 停止] Safe stop sequence complete / 安全停止流程完成")
 
     def _safe_return_to_zero(self) -> None:
-        """使用 smoothstep 轨迹缓慢返回全部关节零点。"""
+        """Use a smoothstep trajectory to slowly return all joints to zero.
+        使用 smoothstep 轨迹缓慢返回全部关节零点。"""
 
         try:
             start_positions = self._read_positions_rad()
 
         except Exception as error:
             print(
-                "[回零] 无法读取实际角度，"
+                "[Return-to-zero / 回零] Cannot read actual angles, "
+                f"using current command angles instead: {error}"
+                " / 无法读取实际角度，"
                 f"改用当前发送角度：{error}"
             )
 
@@ -837,7 +932,7 @@ class ReBotRSMITController:
             else return_zero_config.max_speed_deg_s
         )
 
-        # smoothstep 的最大斜率为 1.5。
+        # The maximum slope of smoothstep is 1.5. / smoothstep 的最大斜率为 1.5。
         required_times = [
             (
                 1.5
@@ -858,12 +953,16 @@ class ReBotRSMITController:
         )
 
         print(
-            "[回零] 正在缓慢回零："
+            "[Return-to-zero / 回零] Slowly returning to zero: "
+            f"estimated {duration_s:.1f} s, "
+            f"peak speed no more than {speed_deg_s:.1f}°/s"
+            " / 正在缓慢回零："
             f"预计 {duration_s:.1f} 秒，"
             f"峰值速度不超过 {speed_deg_s:.1f}°/s"
         )
         print(
-            "[回零] 再次按 Ctrl+C 可立即中止回零"
+            "[Return-to-zero / 回零] Press Ctrl+C again to abort immediately"
+            " / 再次按 Ctrl+C 可立即中止回零"
         )
 
         period = 1.0 / self.control_hz
@@ -875,13 +974,15 @@ class ReBotRSMITController:
         for step_index in range(1, steps + 1):
             if self.abort_return_event.is_set():
                 print(
-                    "\n[回零] 用户中止回零"
+                    "\n[Return-to-zero / 回零] Return-to-zero aborted by user"
+                    " / 用户中止回零"
                 )
                 completed = False
                 break
 
             now = time.monotonic()
 
+            # Keep checking the emergency disconnect threshold during a thermal return-to-zero.
             # 高温回零过程中继续检查紧急断开阈值。
             if (
                 self.thermal_return_requested
@@ -916,7 +1017,11 @@ class ReBotRSMITController:
                         ].motor_id
 
                         print(
-                            "\n[紧急断开] 回零过程中 "
+                            "\n[Emergency disconnect / 紧急断开] During return-to-zero "
+                            f"motor {motor_id} MOS="
+                            f"{hottest_temp:.1f}°C, "
+                            "aborting return-to-zero immediately / "
+                            "回零过程中 "
                             f"电机 {motor_id} MOS="
                             f"{hottest_temp:.1f}°C，"
                             "立即中止回零"
@@ -961,27 +1066,31 @@ class ReBotRSMITController:
             )
 
             print(
-                "[回零] 已发送零点并完成保持，"
+                "[Return-to-zero / 回零] Zero sent and hold complete, "
+                "ready to disable / "
+                "已发送零点并完成保持，"
                 "准备失能"
             )
 
     # -------------------------------------------------------------------------
-    # 资源清理
+    # Resource cleanup / 资源清理
     # -------------------------------------------------------------------------
 
     def _disable_and_close(self) -> None:
-        """失能电机并关闭 MotorBridge 资源。"""
+        """Disable the motors and close MotorBridge resources.
+        失能电机并关闭 MotorBridge 资源。"""
 
         if self.controller is not None:
             try:
                 with self.io_lock:
                     self.controller.disable_all()
 
-                print("[失能] 所有电机已失能")
+                print("[Disable / 失能] All motors disabled / 所有电机已失能")
 
             except Exception as error:
                 print(
-                    f"[失能] disable_all 失败：{error}"
+                    f"[Disable / 失能] disable_all failed: {error}"
+                    f" / disable_all 失败：{error}"
                 )
 
         for motor in self.motors:
