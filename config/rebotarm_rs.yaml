@@ -21,14 +21,13 @@ temperatures:
   disconnect_c: 140.0   # Emergency disable immediately, no return-to-zero / 立即紧急失能，不再回零
 
 return_zero:
-  max_speed_deg_s: 15.0           # Peak speed for normal Esc/Ctrl+C/stop() return-to-zero / 普通 Esc/Ctrl+C/stop() 回零峰值速度
-  thermal_max_speed_deg_s: 8.0    # Peak speed for thermal-triggered return-to-zero / 高温触发后的回零峰值速度
+  max_speed_deg_s: 30.0           # Peak speed for normal Esc/Ctrl+C/stop() return-to-zero / 普通 Esc/Ctrl+C/stop() 回零峰值速度
+  thermal_max_speed_deg_s: 30.0   # Peak speed for thermal-triggered return-to-zero / 高温触发后的回零峰值速度
   min_time_s: 3.0                 # Minimum return-to-zero duration / 最短回零时间
   settle_time_s: 0.30             # Hold time after reaching zero / 到达零点后保持时间
 
 # reBot B601-RS:
-# J1-J3: RS06, J4-J6: RS00
-# MIT parameters follow the RS configuration of reBotArm_control_py.
+# J1-J3: RS06, J4-J6: RS00, motor_id 7: gripper (RS00)
 # MIT 参数参考 reBotArm_control_py 的 RS 配置。
 motors:
   - motor_id: 1
@@ -55,3 +54,7 @@ motors:
     model: rs-00
     kp: 50.0
     kd: 4.0
+  - motor_id: 7
+    model: rs-00
+    kp: 50.0
+    kd: 4.0    # J7 gripper / 夹爪

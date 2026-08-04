@@ -66,10 +66,10 @@ class ReturnZeroConfig:
     """Safe return-to-zero parameters. / 安全回零参数。"""
 
     # Peak return-to-zero speed for normal Esc/Ctrl+C/stop(), unit: deg/s. / 普通 Esc/Ctrl+C/stop() 回零峰值速度，单位：度/秒。
-    max_speed_deg_s: float = 15.0
+    max_speed_deg_s: float = 30.0
 
     # Peak return-to-zero speed after a high-temperature trigger, unit: deg/s. / 高温触发后的回零峰值速度，单位：度/秒。
-    thermal_max_speed_deg_s: float = 8.0
+    thermal_max_speed_deg_s: float = 30.0
 
     # Minimum return-to-zero time, unit: seconds. / 最短回零时间，单位：秒。
     min_time_s: float = 3.0
@@ -80,8 +80,7 @@ class ReturnZeroConfig:
 
 # Default motor configuration for the reBot B601-RS:
 # reBot B601-RS 默认电机配置：
-# J1-J3: RS06
-# J4-J6: RS00
+# J1-J3: RS06, J4-J6: RS00, motor_id 7: gripper (RS00)
 #
 # MIT parameters reference the RS configuration from reBotArm_control_py.
 # MIT 参数参考 reBotArm_control_py 的 RS 配置。
@@ -92,7 +91,15 @@ DEFAULT_MOTORS: tuple[MotorConfig, ...] = (
     MotorConfig(motor_id=4, model="rs-00", kp=50.0, kd=5.0),
     MotorConfig(motor_id=5, model="rs-00", kp=50.0, kd=4.0),
     MotorConfig(motor_id=6, model="rs-00", kp=50.0, kd=4.0),
+    MotorConfig(motor_id=7, model="rs-00", kp=50.0, kd=4.0),
 )
+
+# CAN motor ID of the end-effector gripper. / 末端夹爪 CAN 电机 ID。
+GRIPPER_MOTOR_ID = 7
+
+# Joint index (1-based) of the gripper in set_joint_angle() / set_joint_angles().
+# set_joint_angle() / set_joint_angles() 中夹爪的关节序号（1 起）。
+GRIPPER_JOINT_ID = 7
 
 
 @dataclass(frozen=True)

@@ -37,7 +37,8 @@ import math
 import signal
 import threading
 import time
-from typing import Sequence
+from contextlib import contextmanager
+from typing import Iterator, Sequence
 
 from motorbridge import Controller, Mode
 
@@ -55,6 +56,14 @@ from .config import (
 
 class ReBotRSMITController:
     """reBot B601-RS MIT controller. / reBot B601-RS MIT 控制器。"""
+
+    # Max wait for io_lock during shutdown; avoids deadlock if CAN I/O is stuck.
+    # 关机时等待 io_lock 的最长时间；CAN I/O 卡住时避免死锁。
+    _IO_LOCK_SHUTDOWN_TIMEOUT_S = 2.0
+
+    # Clear alarm latch when temperature drops this many °C below alarm_c.
+    # 温度低于 alarm_c 这么多 °C 时清除报警锁存。
+    _TEMP_ALARM_HYSTERESIS_C = 2.0
 
     def __init__(
         self,
@@ -138,6 +147,47 @@ class ReBotRSMITController:
             None for _ in self.config.motors
         ]
 
+        # Edge-triggered temperature alarm state per motor. / 每个电机的温度报警边沿状态。
+        self._temp_alarm_active = [
+            False for _ in self.config.motors
+        ]
+
+    # -------------------------------------------------------------------------
+    # IO lock helpers / IO 锁辅助
+    # -------------------------------------------------------------------------
+
+    def _try_acquire_io_lock(
+        self,
+        timeout: float | None = None,
+    ) -> bool:
+        """Acquire io_lock; timeout=None blocks. / 获取 io_lock；timeout=None 时阻塞等待。"""
+
+        if timeout is None:
+            self.io_lock.acquire()
+            return True
+
+        return self.io_lock.acquire(timeout=timeout)
+
+    @contextmanager
+    def _io_lock_guard(
+        self,
+        timeout: float | None = None,
+    ) -> Iterator[None]:
+        """Context manager for io_lock with optional timeout. / 带可选超时的 io_lock 上下文管理器。"""
+
+        acquired = self._try_acquire_io_lock(timeout)
+
+        if not acquired:
+            raise TimeoutError(
+                f"Timed out waiting for io_lock after {timeout}s"
+                f" / 等待 io_lock 超时（{timeout} 秒）"
+            )
+
+        try:
+            yield
+        finally:
+            self.io_lock.release()
+
     # -------------------------------------------------------------------------
     # Connection and startup / 连接与启动
     # -------------------------------------------------------------------------
@@ -195,7 +245,7 @@ class ReBotRSMITController:
                     "切换到 MIT 模式"
                 )
 
-                with self.io_lock:
+                with self._io_lock_guard():
                     motor.ensure_mode(
                         Mode.MIT,
                         1000,
@@ -204,7 +254,7 @@ class ReBotRSMITController:
                 time.sleep(0.05)
 
             # Enable all motors only once. / 所有电机只使能一次。
-            with self.io_lock:
+            with self._io_lock_guard():
                 self.controller.enable_all()
 
             time.sleep(0.30)
@@ -236,6 +286,9 @@ class ReBotRSMITController:
         self.shutdown_started = False
         self.signal_count = 0
         self.last_error = None
+        self._temp_alarm_active = [
+            False for _ in self.config.motors
+        ]
         self.started = True
 
         self.control_thread = threading.Thread(
@@ -365,11 +418,13 @@ class ReBotRSMITController:
     def _send_mit_positions(
         self,
         positions_rad: Sequence[float],
+        *,
+        lock_timeout: float | None = None,
     ) -> None:
         """Send a set of MIT position commands to all motors.
         向全部电机发送一组 MIT 位置指令。"""
 
-        with self.io_lock:
+        with self._io_lock_guard(lock_timeout):
             for index, motor in enumerate(self.motors):
                 motor_config = self.config.motors[index]
 
@@ -394,14 +449,14 @@ class ReBotRSMITController:
 
         Example:
             arm.set_joint_angles(
-                [50, 0, 0, 0, 0, 0]
+                [50, 0, 0, 0, 0, 0, 0]
             )
 
-        设置全部关节目标角度。
+        设置全部关节与夹爪目标角度。
 
         示例：
             arm.set_joint_angles(
-                [50, 0, 0, 0, 0, 0]
+                [50, 0, 0, 0, 0, 0, 0]
             )
         """
 
@@ -530,7 +585,7 @@ class ReBotRSMITController:
 
         positions = []
 
-        with self.io_lock:
+        with self._io_lock_guard():
             for index, motor in enumerate(self.motors):
                 try:
                     position = motor.robstride_get_param_f32(
@@ -574,7 +629,7 @@ class ReBotRSMITController:
 
         temperatures: list[float | None] = []
 
-        with self.io_lock:
+        with self._io_lock_guard():
             for motor in self.motors:
                 state = None
 
@@ -606,6 +661,38 @@ class ReBotRSMITController:
 
         self.last_temperatures = temperatures
         return temperatures
+
+    def _report_temperature_alerts(
+        self,
+        temperatures: list[float | None],
+    ) -> None:
+        """Log temperature alarms once per over-threshold episode per motor.
+        每个电机每次超温只报警一次。"""
+
+        hysteresis = self._TEMP_ALARM_HYSTERESIS_C
+
+        for index, temp in enumerate(temperatures):
+            if temp is None:
+                continue
+
+            motor_id = self.config.motors[index].motor_id
+
+            if temp >= self.temp_alarm_c:
+                if not self._temp_alarm_active[index]:
+                    self._temp_alarm_active[index] = True
+
+                    print(
+                        "\n[Temp alarm / 温度报警] "
+                        f"Motor {motor_id} MOS="
+                        f"{temp:.1f}°C, "
+                        "arm keeps running / "
+                        f"电机 {motor_id} MOS="
+                        f"{temp:.1f}°C，"
+                        "机械臂继续运行"
+                    )
+
+            elif temp < self.temp_alarm_c - hysteresis:
+                self._temp_alarm_active[index] = False
 
     def _temperature_loop(self) -> None:
         """Execute the three-level temperature protection. / 执行三级温度保护。"""
@@ -689,16 +776,7 @@ class ReBotRSMITController:
                 )
                 return
 
-            if hottest_temp >= self.temp_alarm_c:
-                print(
-                    "\n[Temp alarm / 温度报警] "
-                    f"Motor {hottest_motor_id} MOS="
-                    f"{hottest_temp:.1f}°C, "
-                    "arm keeps running / "
-                    f"电机 {hottest_motor_id} MOS="
-                    f"{hottest_temp:.1f}°C，"
-                    "机械臂继续运行"
-                )
+            self._report_temperature_alerts(temperatures)
 
     # -------------------------------------------------------------------------
     # Esc and Ctrl+C / Esc 和 Ctrl+C
@@ -861,9 +939,9 @@ class ReBotRSMITController:
 
         current_thread = threading.current_thread()
 
-        for thread in (
-            self.control_thread,
-            self.telemetry_thread,
+        for thread_name, thread in (
+            ("control", self.control_thread),
+            ("temperature", self.telemetry_thread),
         ):
             if (
                 thread is not None
@@ -871,6 +949,16 @@ class ReBotRSMITController:
                 and thread.is_alive()
             ):
                 thread.join(timeout=3.0)
+
+                if thread.is_alive():
+                    print(
+                        f"\n[Stop / 停止] {thread_name} thread did not exit "
+                        "within 3 s (CAN I/O may be stuck); "
+                        "continuing shutdown / "
+                        f"{thread_name} 线程 3 秒内未退出"
+                        "（CAN I/O 可能卡住）；"
+                        "继续关机"
+                    )
 
         if self.keyboard_listener is not None:
             try:
@@ -1042,7 +1130,20 @@ class ReBotRSMITController:
                 )
             ]
 
-            self._send_mit_positions(commands)
+            try:
+                self._send_mit_positions(
+                    commands,
+                    lock_timeout=self._IO_LOCK_SHUTDOWN_TIMEOUT_S,
+                )
+            except TimeoutError as error:
+                print(
+                    "\n[Return-to-zero / 回零] I/O lock timeout, "
+                    f"aborting return-to-zero: {error}"
+                    " / I/O 锁超时，"
+                    f"中止回零：{error}"
+                )
+                completed = False
+                break
 
             with self.target_lock:
                 self.command_positions[:] = commands
@@ -1055,8 +1156,21 @@ class ReBotRSMITController:
                 time.sleep(sleep_time)
 
         if completed:
-            self._send_mit_positions(target_positions)
+            try:
+                self._send_mit_positions(
+                    target_positions,
+                    lock_timeout=self._IO_LOCK_SHUTDOWN_TIMEOUT_S,
+                )
+            except TimeoutError as error:
+                print(
+                    "\n[Return-to-zero / 回零] I/O lock timeout at final zero: "
+                    f"{error}"
+                    " / 发送最终零点时 I/O 锁超时："
+                    f"{error}"
+                )
+                completed = False
 
+        if completed:
             with self.target_lock:
                 self.command_positions[:] = target_positions
                 self.target_positions[:] = target_positions
@@ -1081,16 +1195,31 @@ class ReBotRSMITController:
         失能电机并关闭 MotorBridge 资源。"""
 
         if self.controller is not None:
-            try:
-                with self.io_lock:
+            acquired = self._try_acquire_io_lock(
+                self._IO_LOCK_SHUTDOWN_TIMEOUT_S
+            )
+
+            if acquired:
+                try:
                     self.controller.disable_all()
-
-                print("[Disable / 失能] All motors disabled / 所有电机已失能")
-
-            except Exception as error:
+                    print(
+                        "[Disable / 失能] All motors disabled / "
+                        "所有电机已失能"
+                    )
+                except Exception as error:
+                    print(
+                        f"[Disable / 失能] disable_all failed: {error}"
+                        f" / disable_all 失败：{error}"
+                    )
+                finally:
+                    self.io_lock.release()
+            else:
                 print(
-                    f"[Disable / 失能] disable_all failed: {error}"
-                    f" / disable_all 失败：{error}"
+                    "[Disable / 失能] io_lock unavailable "
+                    "(communication may be stuck), "
+                    "skipping disable_all / "
+                    "io_lock 不可用（通信可能卡住），"
+                    "跳过 disable_all"
                 )
 
         for motor in self.motors:

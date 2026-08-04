@@ -3,6 +3,8 @@
 from .config import (
     DEFAULT_CONFIG_PATH,
     DEFAULT_MOTORS,
+    GRIPPER_JOINT_ID,
+    GRIPPER_MOTOR_ID,
     ControllerConfig,
     MotorConfig,
     ReturnZeroConfig,
@@ -14,6 +16,8 @@ from .controller import ReBotRSMITController
 __all__ = [
     "DEFAULT_CONFIG_PATH",
     "DEFAULT_MOTORS",
+    "GRIPPER_JOINT_ID",
+    "GRIPPER_MOTOR_ID",
     "ControllerConfig",
     "MotorConfig",
     "ReturnZeroConfig",
