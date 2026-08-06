@@ -16,8 +16,8 @@ control:
 # Three-level temperature thresholds, must satisfy: alarm < return_zero < disconnect.
 # 三级温度保护阈值，必须满足：alarm < return_zero < disconnect。
 temperatures:
-  alarm_c: 80.0         # Warning, keep running / 温度报警，继续运行
-  return_zero_c: 100.0  # Stop, slowly return to zero, then disable / 停止运动，缓慢回零后失能
+  alarm_c: 110.0         # Warning, keep running / 温度报警，继续运行
+  return_zero_c: 125.0  # Stop, slowly return to zero, then disable / 停止运动，缓慢回零后失能
   disconnect_c: 140.0   # Emergency disable immediately, no return-to-zero / 立即紧急失能，不再回零
 
 return_zero:
